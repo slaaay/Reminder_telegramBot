@@ -13,6 +13,7 @@ scheduler = AsyncIOScheduler()
 # Ініціалізація бота
 load_dotenv()
 TOKEN = getenv("BOT_TOKEN")
+WAY = getenv("DB_URL")
 
 dp = Dispatcher(storage=MemoryStorage())
 bot = Bot(TOKEN, parse_mode=ParseMode.HTML)
