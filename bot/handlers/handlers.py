@@ -17,13 +17,15 @@ from aiogram.utils.keyboard import InlineKeyboardButton, InlineKeyboardMarkup
 from config import DEFAULT_TIMEZONE
 from datetime import datetime
 
-from bot.db import add_event, list_events, delete_event, list_today_events, save_chat_id, delete_chat_id
+from bot.db import DatabaseManager
 from bot.states import EventForm
 from bot.calendar import create_calendar
-from bot.bot_setup import bot, dp
+from bot.bot_setup import bot, dp, WAY
 from bot.handlers.reminder import schedule_send_reminder
 
 form_router = Router()
+
+db_manager = DatabaseManager(WAY)
 
 @dp.message(Command("notifications"))
 async def cmd_notify(message: types.Message):
@@ -36,7 +38,7 @@ async def cmd_notify(message: types.Message):
 @dp.callback_query(lambda c: c.data == "notify_on")
 async def notifications_on(callback_query: types.CallbackQuery):
     chat_id = callback_query.message.chat.id
-    save_chat_id(chat_id)  # Зберігаємо chat_id в базі даних
+    await db_manager.save_chat_id(chat_id)  # Зберігаємо chat_id в базі даних
     await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
     await callback_query.message.answer("Ви успішно включили нагадування.")
     await callback_query.answer()
@@ -44,7 +46,7 @@ async def notifications_on(callback_query: types.CallbackQuery):
 @dp.callback_query(lambda c: c.data == "notify_off")
 async def notifications_off(callback_query: types.CallbackQuery):
     chat_id = callback_query.message.chat.id
-    delete_chat_id(chat_id)  # Видаляємо chat_id з бази даних
+    await db_manager.delete_chat_id(chat_id)  # Видаляємо chat_id з бази даних
     await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
     await callback_query.message.answer("Ви успішно виключили нагадування.")
     await callback_query.answer()
@@ -184,7 +186,6 @@ async def finalize_event_creation(message: types.Message, state: FSMContext):
     data = await state.get_data()
     chat_id = message.chat.id
     
-    # data['date'] вже є об'єктом datetime.date, і data['time'] - це рядок, наприклад "15:30"
     date_part = data['date']
     time_part_str = data['time']
     time_part = datetime.strptime(time_part_str, '%H:%M').time()
@@ -195,19 +196,20 @@ async def finalize_event_creation(message: types.Message, state: FSMContext):
     event_datetime = datetime.combine(date_part, time_part).replace(tzinfo=DEFAULT_TIMEZONE)
     
     try:
-        event_id = add_event(chat_id, data['name'], data['venue'], data['action'], data['date'], data['time'])
+        event_id = await db_manager.add_event(chat_id, data['name'], data['venue'], data['action'], data['date'], time_part_str)
         logging.info(f"Event added successfully: {event_id}")
+        
+        schedule_send_reminder(scheduler, chat_id, event_id, data['name'], data['venue'], data['action'], event_datetime, bot)    
     except Exception as e:
         logging.error(f"Failed to add event for chat_id {chat_id}: {e}")   
 
     # Додавання події до календаря
-    schedule_send_reminder(scheduler, chat_id, event_id, data['name'], data['venue'], data['action'], event_datetime, bot)    
     await state.clear()     
 
 # Хендлер для команди /event_list
 @form_router.message(Command('event_list'))
 async def list_events_handler(message: types.Message):
-    events = list_events()  # Assuming this function returns a list of event tuples
+    events = await db_manager.list_events()  # Assuming this function returns a list of event tuples
     if not events:
         await message.answer("Список подій порожній. Бажаєте додати подію /event ?")
         return
@@ -234,8 +236,8 @@ async def process_delete(callback_query: types.CallbackQuery):
 
 @form_router.callback_query(lambda c: c.data and c.data.startswith('confirm_delete_'))
 async def process_confirm_delete(callback_query: types.CallbackQuery):
-    event_id = callback_query.data.split('_')[2]
-    delete_event(event_id)
+    event_id = int(callback_query.data.split('_')[2])
+    await db_manager.delete_event(event_id)
     # Видалити попереднє повідомлення
     await bot.delete_message(chat_id=callback_query.message.chat.id, message_id=callback_query.message.message_id)
     await bot.send_message(callback_query.from_user.id, f"Подія видалена")
@@ -249,7 +251,7 @@ async def process_cancel_delete(callback_query: types.CallbackQuery):
 # Хендлер для команди /event_day
 @form_router.message(Command('event_day'))
 async def list_today_events_handler(message: types.Message):
-    events = list_today_events()
+    events = await db_manager.list_today_events()
     # Check if there are no events for today
     if not events:
         await message.answer("Список подій на сьогодні порожній.\nБажаєте додати подію /event ?")
