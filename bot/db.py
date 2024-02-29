@@ -1,85 +1,86 @@
 import pytz
+import asyncio
+import asyncpg
 import logging
 import psycopg2
 
 from psycopg2 import sql
 
-from os import getenv
-from dotenv import load_dotenv
-
+from time import sleep
 from datetime import datetime, timedelta
 
-from bot.bot_setup import scheduler
+from bot.bot_setup import scheduler, WAY
 
-load_dotenv()
-WAY = getenv('DB_URL')
+class DatabaseManager:
+    def __init__(self, WAY):
+        self.WAY = WAY
+        self.conn = None
 
-# Підключення до бази даних
-conn = psycopg2.connect(WAY)
+    async def create_connection(self):
+        self.conn = await asyncpg.connect(self.WAY)
 
-def add_event(chat_id, name, venue, action, date, time):
-    from bot.bot_setup import bot
+    async def add_event(self, chat_id, name, venue, action, date, time_part_str):        
+        time_part = datetime.strptime(time_part_str, '%H:%M').time()
 
-    logging.info(f"Adding event: {name}, chat_id: {chat_id}")
-    # Функція для додавання події до бази даних
-    with conn.cursor() as cursor:
-        insert = sql.SQL("INSERT INTO events (chat_id, name, venue, action, date, time) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id")
-        cursor.execute(insert, (chat_id, name, venue, action, date, time))
-        event_id = cursor.fetchone()[0]  # Отримуємо ID нової події
-    conn.commit()
+        query = "INSERT INTO events (chat_id, name, venue, action, date, time) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"
+        event_id = await self.conn.fetchval(query, chat_id, name, venue, action, date, time_part)
+        return event_id
 
-    return event_id
+    # Функція для отримання усього списку подій з бази даних
+    async def list_events(self):
+        if self.conn is None:
+            await self.create_connection()
+        try:
+            events = await self.conn.fetch("SELECT * FROM events")
+            return events
+        except Exception as e:
+            logging.error(f"An error occurred in list_events function: {e}")
+            return []
 
-def save_chat_id(chat_id):
-    with conn.cursor() as cursor:
-        cursor.execute("INSERT INTO chat_ids (chat_id) VALUES (%s) ON CONFLICT DO NOTHING", (chat_id,))
-    conn.commit()
+    async def save_chat_id(self, chat_id):
+        if self.conn is None:
+            await self.create_connection()  # Ensure connection is established
+        async with self.conn.transaction():
+            await self.conn.execute("INSERT INTO chat_ids (chat_id) VALUES ($1) ON CONFLICT DO NOTHING", chat_id)
 
-def delete_chat_id(chat_id):
-    with conn.cursor() as cursor:
-        cursor.execute("DELETE FROM chat_ids WHERE chat_id = %s", (chat_id,))
-    conn.commit()
+    async def delete_chat_id(self, chat_id):
+        if self.conn is None:
+            await self.create_connection()  # Ensure connection is established
+        async with self.conn.transaction():
+            await self.conn.execute("DELETE FROM chat_ids WHERE chat_id = $1", chat_id)
 
-def get_all_chat_ids():
-    with conn.cursor() as cursor:
-        cursor.execute('SELECT chat_id FROM chat_ids')
-        chat_ids = cursor.fetchall()
-    return [chat_id[0] for chat_id in chat_ids]
+    async def get_all_chat_ids(self):
+        if self.conn is None:
+            await self.create_connection()  # Ensure connection is established
+        async with self.conn.transaction():
+            rows = await self.conn.fetch('SELECT chat_id FROM chat_ids')
+            return [row['chat_id'] for row in rows]
 
-def list_events():
-    # Функція для отримання списку всіх подій з бази даних
-    try:
-        with conn.cursor() as cursor:
-            select = sql.SQL("SELECT * FROM events")
-            cursor.execute(select)
-            events = cursor.fetchall()
-        return events
-    except psycopg2.InterfaceError:
-        conn.rollback()
-        logging.error("InterfaceError occurred in list_events function")
-        return []
-    except Exception as e:
-        conn.rollback()
-        logging.error(f"An error occurred in list_events function: {e}")
-        return []
+    async def delete_event(self, event_id):
+        if self.conn is None:
+            await self.create_connection()  # Ensure connection is established
+        async with self.conn.transaction():
+            await self.conn.execute("DELETE FROM events WHERE id = $1", event_id)
 
-def delete_event(event_id):
-    # Функція для видалення події з бази даних
-    with conn.cursor() as cursor:
-        delete = sql.SQL("DELETE FROM events WHERE id = %s")
-        cursor.execute(delete, (event_id,))
-    conn.commit()
-    cursor.close()
-
-def list_today_events():
     # Функція для отримання списку подій на сьогоднішній день з бази даних
-    try:
-        with conn.cursor() as cursor:
-            select = sql.SQL("SELECT * FROM events WHERE date = CURRENT_DATE")
-            cursor.execute(select)
-            events = cursor.fetchall()
-        return events
-    except psycopg2.OperationalError as e:
-        conn.rollback()
-        logging.error(f"SSL connection error: {e}")
-        return list_today_events()
+    async def list_today_events(self):
+        if self.conn is None:
+            await self.create_connection()
+        try:
+            events = await self.conn.fetch("SELECT * FROM events WHERE date = CURRENT_DATE")
+            return events
+        except Exception as e:
+            logging.error(f"An error occurred in list_today_events function: {e}")
+            return []
+            
+# Ініціалізація DatabaseManager
+db_manager = DatabaseManager(WAY)
+
+# Продовжуємо операцію для list_events , list_today_events
+async def check_events_periodically():
+    while True:
+        today_events = await db_manager.list_today_events()
+        events = await db_manager.list_events()
+        print(today_events)
+        print(events)
+        await asyncio.sleep(3600)  # Check for events every hour
