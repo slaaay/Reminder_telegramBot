@@ -6,6 +6,7 @@ from aiogram import Dispatcher
 from config import DEFAULT_TIMEZONE
 from bot.bot_setup import bot, dp, scheduler
 
+from bot.db import check_events_periodically
 from bot.handlers import handlers
 from bot.handlers.handlers import form_router
 from bot.handlers.reminder import daily_reminder, schedule_send_reminder
@@ -19,6 +20,7 @@ def register_routers(dp: Dispatcher) -> None:
     dp.include_router(form_router)
 
 async def main() -> None:
+    asyncio.create_task(check_events_periodically())
 
     # Додавання задач в планувальник
     scheduler.add_job(daily_reminder, 'cron', hour=6, minute=0, second=0)
